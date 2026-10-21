@@ -11,7 +11,7 @@ uint8 roll_mode 1
 uint8 pitch_mode 1
 uint8 roll_type 0
 uint8 pitch_type 0
-# Radians (ANGLE), rad/s (RATE/PROPORTIONAL_RATE).
+# Degrees (ANGLE), degrees/second (RATE/PROPORTIONAL_RATE).
 # LOCK angle = camera attitude; FPV angle = camera relative angle.
 # FPV pitch uses fpv_pitch_command_sign=-1.0, verified on upright firmware raw 36.
 # Set that parameter to +1.0 for raw wire sign. LOCK and rate signs remain native.

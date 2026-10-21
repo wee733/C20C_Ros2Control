@@ -11,7 +11,7 @@ uint8 command_code
 int16[3] camera_rate_raw_pyr
 int16[3] camera_attitude_raw_rpy
 int16[3] relative_angle_raw_pyr
-# Converted SI values, consistently reordered to roll, pitch, yaw.
+# Converted values: angles in degrees, rates in degrees/second; roll, pitch, yaw.
 # These remain vendor-defined angles; no automatic frame/sign conversion.
 float64[3] camera_rate_rpy
 float64[3] camera_attitude_rpy

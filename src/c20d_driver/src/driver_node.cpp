@@ -64,9 +64,9 @@ public:
     feedback_timeout_ = declare_parameter("feedback_timeout", 0.5, fixed);
     command_timeout_ = declare_parameter("command_timeout", 0.5, fixed);
     auxiliary_timeout_ = declare_parameter("auxiliary_timeout", 0.5, fixed);
-    max_rate_ = declare_parameter("max_rate", 0.5, fixed);
-    roll_limit_ = declare_parameter("roll_limit", 60.0 * kDegToRad, fixed);
-    pitch_limit_ = declare_parameter("pitch_limit", 120.0 * kDegToRad, fixed);
+    max_rate_ = declare_parameter("max_rate", 0.5 / kDegToRad, fixed);
+    roll_limit_ = declare_parameter("roll_limit", 60.0, fixed);
+    pitch_limit_ = declare_parameter("pitch_limit", 120.0, fixed);
     control_enabled_ = declare_parameter("control_enabled", true, fixed);
     fpv_pitch_sign_ = declare_parameter("fpv_pitch_command_sign", -1.0, fixed);
     if (fpv_pitch_sign_ != -1.0 && fpv_pitch_sign_ != 1.0) {
@@ -79,8 +79,8 @@ public:
         throw std::invalid_argument("Timing and limit parameters must be finite and positive");
       }
     }
-    if (rate < 50 || rate > 150 || max_rate_ > 1500.0 * kDegToRad ||
-      roll_limit_ > 60.0 * kDegToRad || pitch_limit_ > 120.0 * kDegToRad)
+    if (rate < 50 || rate > 150 || max_rate_ > 1500.0 ||
+      roll_limit_ > 60.0 || pitch_limit_ > 120.0)
     {
       throw std::invalid_argument("Rate must be 50..150 Hz; limits cannot exceed horizontal C20D");
     }
@@ -235,7 +235,7 @@ private:
         a.mode = modes[i];
         a.type = types[i];
         const double sign = i == 1 && modes[i] == 2 ? fpv_pitch_sign_ : 1.0;
-        a.value = quantize(sign * values[i], (types[i] == 0 ? 0.01 : 0.1) * kDegToRad);
+        a.value = quantize(sign * values[i], types[i] == 0 ? 0.01 : 0.1);
         if (center[i]) {
           a.center = !a.center;
         }
@@ -268,13 +268,13 @@ private:
       if (m.valid) {
         for (std::size_t i = 0; i < 3; ++i) {
           const auto angle = m.attitude_rpy[i];
-          const auto limit = i == 1 ? kPi / 2 : kPi;
+          const auto limit = i == 1 ? 90.0 : 180.0;
           if (!std::isfinite(angle) || angle < -limit || angle > limit ||
             (i != 1 && angle == limit))
           {
             throw std::invalid_argument("Carrier attitude out of range");
           }
-          candidate.carrier_angle[i] = quantize(angle, 0.01 * kDegToRad);
+          candidate.carrier_angle[i] = quantize(angle, 0.01);
           if (i != 1 && candidate.carrier_angle[i] == 18000) {
             candidate.carrier_angle[i] = -18000;
           }
@@ -295,16 +295,16 @@ private:
       check_stamp(m.header, auxiliary_timeout_);
       if (m.vertical_fov_deg > 127 || !std::isfinite(m.zoom) || m.zoom < 0 ||
         m.zoom > 16777.215 || !std::isfinite(m.horizontal_offset) ||
-        !std::isfinite(m.vertical_offset) || std::abs(m.horizontal_offset) > kPi ||
-        std::abs(m.vertical_offset) > kPi)
+        !std::isfinite(m.vertical_offset) || std::abs(m.horizontal_offset) > 180.0 ||
+        std::abs(m.vertical_offset) > 180.0)
       {
         throw std::invalid_argument("Invalid camera data");
       }
       control_.vertical_fov = m.vertical_fov_deg;
       control_.zoom = static_cast<uint32_t>(std::llround(m.zoom * 1000));
       control_.target_angle = {
-        static_cast<float>(m.horizontal_offset / kDegToRad),
-        static_cast<float>(m.vertical_offset / kDegToRad)};
+        static_cast<float>(m.horizontal_offset),
+        static_cast<float>(m.vertical_offset)};
       camera_time_ = Clock::now();
     } catch (const std::exception & e) {
       RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000, "Rejected camera: %s", e.what());
@@ -329,15 +329,17 @@ private:
     m.raw_frame = f.raw;
     const std::array<std::size_t, 3> reorder{1, 0, 2};
     for (std::size_t i = 0; i < 3; ++i) {
-      m.camera_rate_rpy[i] = f.rate[reorder[i]] * 0.1 * kDegToRad;
-      m.camera_attitude_rpy[i] = f.attitude[i] * 0.01 * kDegToRad;
-      m.relative_angle_rpy[i] = f.relative[reorder[i]] * 0.01 * kDegToRad;
+      m.camera_rate_rpy[i] = f.rate[reorder[i]] * 0.1;
+      m.camera_attitude_rpy[i] = f.attitude[i] * 0.01;
+      m.relative_angle_rpy[i] = f.relative[reorder[i]] * 0.01;
     }
     state_pub_->publish(m);
     sensor_msgs::msg::JointState joints;
     joints.header = m.header;
     joints.name = {"c20d_roll_joint", "c20d_pitch_joint"};
-    joints.position = {m.relative_angle_rpy[0], m.relative_angle_rpy[1]};
+    // Standard JointState positions must remain radians. Custom messages use degrees.
+    joints.position = {
+      m.relative_angle_rpy[0] * kDegToRad, m.relative_angle_rpy[1] * kDegToRad};
     // IMU body rates are not joint velocities; leave velocity/effort absent.
     joints_pub_->publish(joints);
   }

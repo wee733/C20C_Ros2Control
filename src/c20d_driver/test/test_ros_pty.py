@@ -29,12 +29,14 @@ import struct
 import subprocess
 import time
 
+from c20d_driver.msg import CameraData
 from c20d_driver.msg import CarrierData
 from c20d_driver.msg import GimbalCommand
 from c20d_driver.msg import GimbalState
 from c20d_driver.srv import DeviceCommand
 import rclpy
 from rclpy.qos import qos_profile_sensor_data
+from sensor_msgs.msg import JointState
 
 
 def test_ros_serial_roundtrip():
@@ -45,10 +47,14 @@ def test_ros_serial_roundtrip():
     rclpy.init(domain_id=domain)
     node = rclpy.create_node('c20d_pty_test')
     states = []
+    joints = []
+    node.create_subscription(
+        JointState, '/c20d_driver/joint_states', joints.append, qos_profile_sensor_data)
     subscription = node.create_subscription(
         GimbalState, '/c20d_driver/state', states.append, qos_profile_sensor_data)
     publisher = node.create_publisher(GimbalCommand, '/c20d_driver/command', 1)
     carrier = node.create_publisher(CarrierData, '/c20d_driver/carrier', 1)
+    camera = node.create_publisher(CameraData, '/c20d_driver/camera', 1)
     client = node.create_client(DeviceCommand, '/c20d_driver/device_command')
     environment = dict(os.environ, ROS_DOMAIN_ID=str(domain))
     process = subprocess.Popen([
@@ -93,13 +99,17 @@ def test_ros_serial_roundtrip():
         assert state.firmware_version_raw == 36
         assert state.upright and state.temperature_ready
         assert list(state.camera_rate_raw_pyr) == [-1, 0, -2]
-        assert math.isclose(state.relative_angle_rpy[0], math.radians(0.95))
-        assert math.isclose(state.relative_angle_rpy[1], math.radians(-139.98))
+        assert math.isclose(state.relative_angle_rpy[0], 0.95)
+        assert math.isclose(state.relative_angle_rpy[1], -139.98)
+        assert math.isclose(state.camera_rate_rpy[1], -0.1)
+        assert math.isclose(state.camera_attitude_rpy[1], 137.08)
+        assert joints and math.isclose(joints[-1].position[0], math.radians(0.95))
+        assert math.isclose(joints[-1].position[1], math.radians(-139.98))
         assert all(packet[2] >> 3 == 0 for packet in sent), 'Startup must only poll'
 
         command = GimbalCommand()
-        command.roll = math.radians(2.0)
-        command.pitch = math.radians(-3.0)
+        command.roll = 2.0
+        command.pitch = -3.0
         command.center_roll = True
         publisher.publish(command)
         pump(0.15)
@@ -115,7 +125,7 @@ def test_ros_serial_roundtrip():
         publisher.publish(command)
         pump(0.05)
         assert sent[-1][4:13] == previous
-        command.roll = math.radians(61.0)
+        command.roll = 61.0
         publisher.publish(command)
         pump(0.05)
         assert sent[-1][4:13] == previous
@@ -123,7 +133,7 @@ def test_ros_serial_roundtrip():
         command = GimbalCommand()
         command.roll_mode = 2
         command.pitch_mode = 2
-        command.pitch = math.radians(2.0)
+        command.pitch = 2.0
         publisher.publish(command)
         pump(0.1)
         assert sent[-1][4] == 0x28
@@ -133,7 +143,7 @@ def test_ros_serial_roundtrip():
         command = GimbalCommand()
         command.roll_type = 2
         command.pitch_type = 2
-        command.pitch = math.radians(5.0)
+        command.pitch = 5.0
         publisher.publish(command)
         pump(0.1)
         assert sent[-1][7] == 0x90
@@ -143,7 +153,7 @@ def test_ros_serial_roundtrip():
 
         inertial = CarrierData()
         inertial.valid = True
-        inertial.attitude_rpy = [math.radians(5)] * 3
+        inertial.attitude_rpy = [5.0] * 3
         inertial.acceleration_neu = [0.1] * 3
         carrier.publish(inertial)
         pump(0.1)
@@ -151,6 +161,15 @@ def test_ros_serial_roundtrip():
         assert struct.unpack_from('<hhh', sent[-1], 14) == (500, 500, 500)
         pump(0.2)
         assert sent[-1][13] == 0
+
+        optical = CameraData()
+        optical.vertical_fov_deg = 60
+        optical.zoom = 1.0
+        optical.horizontal_offset = 2.0
+        optical.vertical_offset = -3.0
+        camera.publish(optical)
+        pump(0.1)
+        assert struct.unpack_from('<ff', sent[-1], 30) == (2.0, -3.0)
 
         assert client.service_is_ready()
         request = DeviceCommand.Request()

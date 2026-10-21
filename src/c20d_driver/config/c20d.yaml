@@ -6,10 +6,10 @@ c20d_driver:
     feedback_timeout: 0.5
     command_timeout: 0.5
     auxiliary_timeout: 0.5
-    # radians / radians per second, native vendor sign conventions
-    max_rate: 0.5
-    roll_limit: 1.0471975511965976
-    pitch_limit: 2.0943951023931953
+    # degrees / degrees per second, native vendor sign conventions
+    max_rate: 28.64788975654116
+    roll_limit: 60.0
+    pitch_limit: 120.0
     control_enabled: true
     # FPV pitch target follows relative feedback on the tested upright C20D.
     # Set +1.0 to use the manufacturer's raw command sign.
