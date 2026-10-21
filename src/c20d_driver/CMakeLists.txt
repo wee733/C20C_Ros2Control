@@ -46,6 +46,7 @@ target_link_libraries(c20d_probe c20d_protocol)
 install(TARGETS c20d_protocol EXPORT export_c20d_protocol
   ARCHIVE DESTINATION lib LIBRARY DESTINATION lib RUNTIME DESTINATION bin)
 install(TARGETS c20d_node c20d_probe DESTINATION lib/${PROJECT_NAME})
+install(PROGRAMS scripts/gimbal_teleop_relay.py DESTINATION lib/${PROJECT_NAME})
 install(DIRECTORY include/ DESTINATION include/${PROJECT_NAME})
 install(DIRECTORY launch config DESTINATION share/${PROJECT_NAME})
 ament_export_targets(export_c20d_protocol HAS_LIBRARY_TARGET)
@@ -64,6 +65,7 @@ if(BUILD_TESTING)
       "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR}/rosidl_generator_py"
     ENV
       "C20D_TEST_EXECUTABLE=$<TARGET_FILE:c20d_node>"
+      "C20D_TEST_RELAY=${CMAKE_CURRENT_SOURCE_DIR}/scripts/gimbal_teleop_relay.py"
   )
   find_package(ament_lint_auto REQUIRED)
   ament_lint_auto_find_test_dependencies()

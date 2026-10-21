@@ -3,9 +3,12 @@
 <launch>
   <arg name="port" default="/dev/ttyTHS1" description="C20D TTL serial device"/>
   <arg name="control_enabled" default="true"/>
+  <arg name="teleop_enabled" default="true" description="Start Foxglove Twist relay"/>
   <node pkg="c20d_driver" exec="c20d_node" name="c20d_driver" output="screen">
     <param from="$(find-pkg-share c20d_driver)/config/c20d.yaml"/>
     <param name="port" value="$(var port)"/>
     <param name="control_enabled" value="$(var control_enabled)"/>
   </node>
+  <node if="$(var teleop_enabled)" pkg="c20d_driver" exec="gimbal_teleop_relay.py"
+        name="gimbal_teleop_relay" output="screen"/>
 </launch>

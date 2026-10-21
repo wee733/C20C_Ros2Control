@@ -27,6 +27,7 @@ import pty
 import signal
 import struct
 import subprocess
+import sys
 import time
 
 from c20d_driver.msg import AngleState
@@ -39,6 +40,7 @@ from c20d_driver.msg import GimbalState
 from c20d_driver.msg import ProportionalRateCommand
 from c20d_driver.msg import RelativeAngleCommand
 from c20d_driver.srv import DeviceCommand
+from geometry_msgs.msg import Twist
 import rclpy
 from rclpy.qos import DurabilityPolicy
 from rclpy.qos import qos_profile_sensor_data
@@ -76,6 +78,7 @@ def test_ros_serial_roundtrip():
         ProportionalRateCommand, '/c20d_driver/command/proportional_rate', 1)
     carrier = node.create_publisher(CarrierData, '/c20d_driver/carrier', 1)
     camera = node.create_publisher(CameraData, '/c20d_driver/camera', 1)
+    teleop = node.create_publisher(Twist, '/gimbal_teleop/cmd', 1)
     client = node.create_client(DeviceCommand, '/c20d_driver/device_command')
     echo_types = {
         'relative_angle': RelativeAngleCommand,
@@ -93,6 +96,7 @@ def test_ros_serial_roundtrip():
         os.environ['C20D_TEST_EXECUTABLE'], '--ros-args', '-p',
         'port:=' + os.ttyname(slave), '-p', 'command_timeout:=0.2',
         '-p', 'auxiliary_timeout:=0.2', '-p', 'feedback_timeout:=0.3'], env=environment)
+    relay = subprocess.Popen([sys.executable, os.environ['C20D_TEST_RELAY']], env=environment)
     wire = bytearray()
     sent = []
     respond = True
@@ -104,6 +108,7 @@ def test_ros_serial_roundtrip():
         end = time.monotonic() + seconds
         while time.monotonic() < end:
             assert process.poll() is None, 'C++ node exited unexpectedly'
+            assert relay.poll() is None, 'Teleop relay exited unexpectedly'
             try:
                 wire.extend(os.read(master, 8192))
             except BlockingIOError:
@@ -330,6 +335,34 @@ def test_ros_serial_roundtrip():
         new_triggers = [p[2] & 7 for p in sent if p[2] >> 3 == 2]
         assert triggers[-1] != new_triggers[-1], 'Repeat command must change trigger count'
 
+        # Actual relay -> ROS driver -> UART, without any real hardware.
+        assert teleop.get_subscription_count() == 1
+        assert node.count_publishers('/gimbal_teleop/input_echo') == 1
+        twist = Twist()
+        twist.angular.x = -10.0
+        twist.angular.y = 10.0
+        teleop.publish(twist)
+        pump(0.15)
+        assert struct.unpack_from('<h', sent[-1], 5)[0] == -100
+        assert struct.unpack_from('<h', sent[-1], 8)[0] == 100
+        assert echoes['angular_rate'][-1].roll_deg_s == -10.0
+        assert echoes['angular_rate'][-1].pitch_deg_s == 10.0
+        assert echoes['angular_rate'][-1].header.stamp.sec > 0
+        last_echo_count = len(echoes['angular_rate'])
+        twist.angular.y = float('nan')
+        teleop.publish(twist)
+        pump(0.1)
+        assert len(echoes['angular_rate']) == last_echo_count
+        pump(0.3)
+        assert struct.unpack_from('<h', sent[-1], 5)[0] == 0
+        assert struct.unpack_from('<h', sent[-1], 8)[0] == 0
+        assert len(echoes['angular_rate']) == last_echo_count, 'Relay must not repeat stale input'
+        teleop.publish(Twist())
+        pump(0.1)
+        assert len(echoes['angular_rate']) == last_echo_count + 1
+        assert echoes['angular_rate'][-1].roll_deg_s == 0.0
+        assert echoes['angular_rate'][-1].pitch_deg_s == 0.0
+
         respond = False
         pump(0.45)
         reconnect_start = len(sent)
@@ -340,6 +373,8 @@ def test_ros_serial_roundtrip():
         assert all(p[2] >> 3 == 0 for p in sent[reconnect_start:])
         assert struct.unpack_from('<h', sent[-1], 8)[0] == 0
     finally:
+        relay.send_signal(signal.SIGINT)
+        relay.wait(timeout=5)
         process.send_signal(signal.SIGINT)
         process.wait(timeout=5)
         node.destroy_subscription(subscription)

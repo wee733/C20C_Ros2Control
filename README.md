@@ -2,7 +2,7 @@
 
 先飞（Xianfei）**C-20D 卧式两轴云台**的 C++17 驱动，面向 **Ubuntu 24.04 / ROS 2 Jazzy**，MIT 许可证。仓库名沿用 `C20C_Ros2Control`，本实现与实机验证对象是 **C20D 卧式**，不代表已验证 C20C 或立式型号。
 
-依据厂家《云台私有协议-XF(A5)V1.0.4》实现 40 字节控制帧和 26 字节反馈帧。运行时的串口、协议和 ROS 节点全部使用 C++；Python 仅用于无硬件集成测试。
+依据厂家《云台私有协议-XF(A5)V1.0.4》实现 40 字节控制帧和 26 字节反馈帧。串口、协议和核心 ROS 驱动使用 C++；Foxglove 方向键转发节点按接入需求使用 Python，另外提供 Python 无硬件集成测试。
 
 ## 0.3.0 接口与方向更新
 
@@ -96,6 +96,29 @@ ros2 launch c20d_driver c20d.launch.xml port:=/dev/ttyTHS1 control_enabled:=fals
 回显只包含通过驱动校验、已接受的原始输入，保留输入时间戳。每种回显 reliable + transient_local、深度 1，稍后连接的兼容订阅者可读取该类型最后一条输入。它不是设备执行成功确认，也不是当前生效目标：切换控制类型、速度超时或断线后，历史回显可能仍存在。执行结果看 `state` 和设备实际反馈。拒绝的输入不回显。
 
 bridge 进程必须在加载本工作区 `install/setup.bash` 的环境中启动，话题白名单需包含 `command_echo/...`，客户端发布白名单需允许 `command/...`。升级后重启驱动，Foxglove 重新连接以刷新类型。旧 `/command` 和 `GimbalCommand` 已在 0.3.0 移除，不应再配置到 Publish 面板中。
+
+## Foxglove 方向键转发
+
+`ros2 launch c20d_driver c20d.launch.xml` 默认同时启动 `gimbal_teleop_relay`。驱动已运行时，也可以单独启动一次（不要重复运行多个转发节点）：
+
+```bash
+source /opt/ros/jazzy/setup.bash
+source install/setup.bash
+ros2 run c20d_driver gimbal_teleop_relay.py
+```
+
+启动驱动但不启用转发：`ros2 launch c20d_driver c20d.launch.xml teleop_enabled:=false`。
+
+- 输入 `/gimbal_teleop/cmd`，类型 `geometry_msgs/msg/Twist`。
+- `angular.x` 原样转为 `AngularRateCommand.roll_deg_s`；`angular.y` 原样转为 `pitch_deg_s`。
+- 输出 `/c20d_driver/command/angular_rate`，每条输入转发一次并加上当前 ROS 时间戳。
+- **该专用 Twist 话题的 angular.x/y 使用度/秒**，是面板约定，不是标准 Twist 的 rad/s。不要接到其他底盘速度话题。忽略 linear 和 angular.z。
+- 面板按住时以 20 Hz 发布 ±10°/s，松手/停止按钮发布 angular.x/y 均为 0；俯仰正值抬头。横滚按 x 原符号转发，左右按钮的物理方向需按实际安装核对。
+- 不缓存重发速度；停止输入后驱动按 `command_timeout`（默认 0.5 s）归零。它依赖驱动运行及串口有效，不是硬件急停。
+- 输入包含非有限 angular.x/y 时不转发；深度 1 避免积压旧命令。速度上限由云台驱动的 `max_rate` 校验，不在转发层另做倍率换算。
+- `/gimbal_teleop/input_echo` 在启动时提供 Twist 类型定义并回显有限数输入，供 Foxglove 获取 schema。它表示转发节点收到输入，不表示驱动或设备接受了命令；后者看 `/c20d_driver/command_echo/angular_rate` 与实际反馈。
+
+桥接白名单需要允许客户端发布 `/gimbal_teleop/cmd`，并允许广播 `/gimbal_teleop/input_echo`。默认放行全部时无需修改。转发节点不产生周期性保活，避免在网络断流后继续刷新云台速度。
 
 ## 控制示例
 
