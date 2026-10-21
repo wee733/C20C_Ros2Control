@@ -24,6 +24,7 @@
 import math
 
 from c20d_driver.msg import AngularRateCommand
+from c20d_driver.msg import RelativeAngleCommand
 from geometry_msgs.msg import Twist
 import rclpy
 from rclpy.node import Node
@@ -39,22 +40,47 @@ class GimbalTeleopRelay(Node):
         super().__init__('gimbal_teleop_relay')
         self.publisher = self.create_publisher(
             AngularRateCommand, '/c20d_driver/command/angular_rate', 1)
+        self.angle_publisher = self.create_publisher(
+            RelativeAngleCommand, '/c20d_driver/command/relative_angle', 1)
+        self.center_held = False
+        self.centering = False
         echo_qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.echo = self.create_publisher(Twist, '/gimbal_teleop/input_echo', echo_qos)
         self.subscription = self.create_subscription(
             Twist, '/gimbal_teleop/cmd', self.on_twist, 1)
 
     def on_twist(self, message):
-        """Map x to roll and y to pitch; this dedicated input uses degrees/second."""
-        if not all(math.isfinite(v) for v in (message.angular.x, message.angular.y)):
-            self.get_logger().warning('Rejected non-finite gimbal teleop velocity')
+        """Map x/y to rates and the rising edge of linear.z > 0.5 to centering."""
+        if not all(math.isfinite(v) for v in (
+                message.angular.x, message.angular.y, message.linear.z)):
+            self.get_logger().warning('Rejected non-finite gimbal teleop input')
             return
+        self.echo.publish(message)
+        stamp = self.get_clock().now().to_msg()
+        if message.linear.z > 0.5:
+            if not self.center_held:
+                # One message atomically replaces both velocity targets with zero-angle
+                # targets. A separate rate stop on another topic could arrive after it.
+                command = RelativeAngleCommand()
+                command.header.stamp = stamp
+                command.center_roll = True
+                command.center_pitch = True
+                self.angle_publisher.publish(command)
+                self.centering = True
+                self.get_logger().info('Requested gimbal centering')
+            self.center_held = True
+            return
+
+        self.center_held = False
+        if self.centering and message.angular.x == 0.0 and message.angular.y == 0.0:
+            # The pad's release/idle packet must not cancel an unfinished return.
+            return
+        self.centering = False
         command = AngularRateCommand()
-        command.header.stamp = self.get_clock().now().to_msg()
+        command.header.stamp = stamp
         command.roll_deg_s = float(message.angular.x)
         command.pitch_deg_s = float(message.angular.y)
         self.publisher.publish(command)
-        self.echo.publish(message)
 
 
 def main(args=None):

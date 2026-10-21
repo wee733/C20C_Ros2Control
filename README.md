@@ -111,12 +111,14 @@ ros2 run c20d_driver gimbal_teleop_relay.py
 
 - 输入 `/gimbal_teleop/cmd`，类型 `geometry_msgs/msg/Twist`。
 - `angular.x` 原样转为 `AngularRateCommand.roll_deg_s`；`angular.y` 原样转为 `pitch_deg_s`。
-- 输出 `/c20d_driver/command/angular_rate`，每条输入转发一次并加上当前 ROS 时间戳。
-- **该专用 Twist 话题的 angular.x/y 使用度/秒**，是面板约定，不是标准 Twist 的 rad/s。不要接到其他底盘速度话题。忽略 linear 和 angular.z。
+- 普通方向输入输出到 `/c20d_driver/command/angular_rate`，加上当前 ROS 时间戳；回中输入输出到 `/c20d_driver/command/relative_angle`。
+- **该专用 Twist 话题的 angular.x/y 使用度/秒**，是面板约定，不是标准 Twist 的 rad/s。不要接到其他底盘速度话题。`linear.z > 0.5` 是回中信号；忽略 linear.x/y 和 angular.z。
 - 面板按住时以 20 Hz 发布 ±10°/s，松手/停止按钮发布 angular.x/y 均为 0；俯仰正值抬头。横滚按 x 原符号转发，左右按钮的物理方向需按实际安装核对。
+- 中间按钮 `linear.z > 0.5` 的按下沿只发送一次 `RelativeAngleCommand`，两轴目标为 0°，`center_roll` / `center_pitch` 都为 true。它在驱动回调中原子替换旧速度目标，不在不同话题连续发送“停止 + 回中”，避免顺序竞态。按住不重复，松开后再按可重新触发。
+- 回中后的零速度松手/空闲包不覆盖回中目标，避免中途停住；新的非零方向输入可接管，随后松开仍发送零速度。重启转发节点会重置按键状态，建议松开按钮后重启。
 - 不缓存重发速度；停止输入后驱动按 `command_timeout`（默认 0.5 s）归零。它依赖驱动运行及串口有效，不是硬件急停。
-- 输入包含非有限 angular.x/y 时不转发；深度 1 避免积压旧命令。速度上限由云台驱动的 `max_rate` 校验，不在转发层另做倍率换算。
-- `/gimbal_teleop/input_echo` 在启动时提供 Twist 类型定义并回显有限数输入，供 Foxglove 获取 schema。它表示转发节点收到输入，不表示驱动或设备接受了命令；后者看 `/c20d_driver/command_echo/angular_rate` 与实际反馈。
+- 输入包含非有限 angular.x/y 或 linear.z 时不转发；深度 1 避免积压旧命令。速度上限由云台驱动的 `max_rate` 校验，不在转发层另做倍率换算。
+- `/gimbal_teleop/input_echo` 在启动时提供 Twist 类型定义并回显有限数输入，供 Foxglove 获取 schema。它表示转发节点收到输入，不表示驱动或设备接受了命令；后者看 `/c20d_driver/command_echo/angular_rate`、`/c20d_driver/command_echo/relative_angle` 与实际反馈。
 
 桥接白名单需要允许客户端发布 `/gimbal_teleop/cmd`，并允许广播 `/gimbal_teleop/input_echo`。默认放行全部时无需修改。转发节点不产生周期性保活，避免在网络断流后继续刷新云台速度。
 

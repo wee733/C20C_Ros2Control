@@ -2,7 +2,7 @@
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>c20d_driver</name>
-  <version>0.3.2</version>
+  <version>0.3.3</version>
   <description>C++ ROS 2 serial driver for Xianfei C-20D horizontal gimbals</description>
   <maintainer email="85959727+wee733@users.noreply.github.com">wee733</maintainer>
   <license>MIT</license>

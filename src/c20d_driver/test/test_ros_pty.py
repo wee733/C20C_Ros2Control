@@ -363,6 +363,55 @@ def test_ros_serial_roundtrip():
         assert echoes['angular_rate'][-1].roll_deg_s == 0.0
         assert echoes['angular_rate'][-1].pitch_deg_s == 0.0
 
+        # Center is one atomic relative-angle command, not unordered rate + angle topics.
+        before_center = sent[-1]
+        relative_count = len(echoes['relative_angle'])
+        rate_count = len(echoes['angular_rate'])
+        center = Twist()
+        center.linear.z = 1.0
+        for _ in range(8):
+            teleop.publish(center)
+            pump(0.05)
+        assert len(echoes['relative_angle']) == relative_count + 1
+        centered = echoes['relative_angle'][-1]
+        assert centered.center_roll and centered.center_pitch
+        assert centered.roll_deg == 0.0 and centered.pitch_deg == 0.0
+        assert sent[-1][4] & 0xf0 == 0x20 and sent[-1][7] & 0xf0 == 0x20
+        assert (sent[-1][4] ^ before_center[4]) & 8
+        assert (sent[-1][7] ^ before_center[7]) & 8
+        assert struct.unpack_from('<h', sent[-1], 5)[0] == 0
+        assert struct.unpack_from('<h', sent[-1], 8)[0] == 0
+        assert len(echoes['angular_rate']) == rate_count
+        invalid_center = Twist()
+        invalid_center.linear.z = float('nan')
+        teleop.publish(invalid_center)
+        pump(0.05)
+        teleop.publish(center)
+        pump(0.05)
+        assert len(echoes['relative_angle']) == relative_count + 1
+        # Releasing the pad must not overwrite the return with a rate hold.
+        for _ in range(4):
+            teleop.publish(Twist())
+            pump(0.05)
+        assert len(echoes['angular_rate']) == rate_count
+        assert sent[-1][7] & 0xf0 == 0x20
+        teleop.publish(center)
+        pump(0.1)
+        assert len(echoes['relative_angle']) == relative_count + 2
+        assert (sent[-1][4] ^ before_center[4]) & 8 == 0
+        assert (sent[-1][7] ^ before_center[7]) & 8 == 0
+        # A deliberate directional input takes over, and its release stops immediately.
+        directional = Twist()
+        directional.angular.y = 3.0
+        teleop.publish(directional)
+        pump(0.1)
+        assert echoes['angular_rate'][-1].pitch_deg_s == 3.0
+        assert struct.unpack_from('<h', sent[-1], 8)[0] == 30
+        teleop.publish(Twist())
+        pump(0.05)
+        assert echoes['angular_rate'][-1].pitch_deg_s == 0.0
+        assert struct.unpack_from('<h', sent[-1], 8)[0] == 0
+
         respond = False
         pump(0.45)
         reconnect_start = len(sent)
