@@ -1,0 +1,32 @@
+name: ROS 2 Jazzy
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  build-test:
+    runs-on: ubuntu-24.04
+    container: ros:jazzy-ros-base
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install dependencies
+        run: |
+          apt-get update
+          apt-get install -y python3-colcon-common-extensions python3-rosdep
+          rosdep update --rosdistro jazzy
+          rosdep install --from-paths src --ignore-src --rosdistro jazzy -y
+      - name: Build
+        run: |
+          source /opt/ros/jazzy/setup.bash
+          colcon build --packages-up-to c20d_driver --symlink-install
+      - name: Test and lint (pseudo-terminal only)
+        env:
+          AMENT_CPPCHECK_ALLOW_SLOW_VERSIONS: '1'
+        run: |
+          source /opt/ros/jazzy/setup.bash
+          colcon test --packages-select c20d_driver --event-handlers console_direct+
+          colcon test-result --verbose

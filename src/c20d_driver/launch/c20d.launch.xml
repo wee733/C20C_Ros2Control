@@ -1,0 +1,11 @@
+<?xml version="1.0"?>
+<!-- Copyright 2026 wee733. SPDX-License-Identifier: MIT -->
+<launch>
+  <arg name="port" default="/dev/ttyTHS1" description="C20D TTL serial device"/>
+  <arg name="control_enabled" default="true"/>
+  <node pkg="c20d_driver" exec="c20d_node" name="c20d_driver" output="screen">
+    <param from="$(find-pkg-share c20d_driver)/config/c20d.yaml"/>
+    <param name="port" value="$(var port)"/>
+    <param name="control_enabled" value="$(var control_enabled)"/>
+  </node>
+</launch>

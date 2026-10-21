@@ -1,0 +1,12 @@
+uint8 CALIBRATE_GYRO=1
+uint8 ENABLE_MOTORS=2
+uint8 DISABLE_MOTORS=3
+uint8 MANUAL=4
+uint8 POINT_MOVE=5
+uint8 TRACK_TARGET=6
+uint8 command
+---
+# Accepted into the transmit queue, NOT confirmation of device execution.
+# Observe GimbalState.command_code and command_status for device result.
+bool accepted
+string message
