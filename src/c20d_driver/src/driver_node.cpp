@@ -27,10 +27,15 @@
 #include <string>
 #include <utility>
 
+#include "c20d_driver/msg/angle_state.hpp"
+#include "c20d_driver/msg/angular_rate_command.hpp"
+#include "c20d_driver/msg/angular_rate_state.hpp"
+#include "c20d_driver/msg/attitude_command.hpp"
 #include "c20d_driver/msg/camera_data.hpp"
 #include "c20d_driver/msg/carrier_data.hpp"
-#include "c20d_driver/msg/gimbal_command.hpp"
 #include "c20d_driver/msg/gimbal_state.hpp"
+#include "c20d_driver/msg/proportional_rate_command.hpp"
+#include "c20d_driver/msg/relative_angle_command.hpp"
 #include "c20d_driver/protocol.hpp"
 #include "c20d_driver/serial_port.hpp"
 #include "c20d_driver/srv/device_command.hpp"
@@ -59,7 +64,7 @@ public:
     rcl_interfaces::msg::ParameterDescriptor fixed;
     fixed.read_only = true;
     port_name_ = declare_parameter("port", "/dev/ttyTHS1", fixed);
-    frame_id_ = declare_parameter("frame_id", "c20d_vendor", fixed);
+    frame_id_ = declare_parameter("frame_id", "c20d_head_up", fixed);
     const double rate = declare_parameter("update_rate", 100.0, fixed);
     feedback_timeout_ = declare_parameter("feedback_timeout", 0.5, fixed);
     command_timeout_ = declare_parameter("command_timeout", 0.5, fixed);
@@ -68,10 +73,6 @@ public:
     roll_limit_ = declare_parameter("roll_limit", 60.0, fixed);
     pitch_limit_ = declare_parameter("pitch_limit", 120.0, fixed);
     control_enabled_ = declare_parameter("control_enabled", true, fixed);
-    fpv_pitch_sign_ = declare_parameter("fpv_pitch_command_sign", -1.0, fixed);
-    if (fpv_pitch_sign_ != -1.0 && fpv_pitch_sign_ != 1.0) {
-      throw std::invalid_argument("fpv_pitch_command_sign must be -1.0 or 1.0");
-    }
     const std::array<double, 7> parameters = {rate, feedback_timeout_, command_timeout_,
       auxiliary_timeout_, max_rate_, roll_limit_, pitch_limit_};
     for (auto value : parameters) {
@@ -85,14 +86,57 @@ public:
       throw std::invalid_argument("Rate must be 50..150 Hz; limits cannot exceed horizontal C20D");
     }
     state_pub_ = create_publisher<msg::GimbalState>("~/state", rclcpp::SensorDataQoS());
+    relative_pub_ = create_publisher<msg::AngleState>(
+      "~/state/relative_angle", rclcpp::SensorDataQoS());
+    attitude_pub_ = create_publisher<msg::AngleState>(
+      "~/state/attitude", rclcpp::SensorDataQoS());
+    rate_pub_ = create_publisher<msg::AngularRateState>(
+      "~/state/angular_rate", rclcpp::SensorDataQoS());
     joints_pub_ = create_publisher<sensor_msgs::msg::JointState>(
       "~/joint_states", rclcpp::SensorDataQoS());
     diagnostics_pub_ = create_publisher<diagnostic_msgs::msg::DiagnosticArray>("~/diagnostics", 10);
+    // Advertise schemas even before the first command; retain only accepted inputs.
+    const auto echo_qos = rclcpp::QoS(1).reliable().transient_local();
+    relative_echo_pub_ = create_publisher<msg::RelativeAngleCommand>(
+      "~/command_echo/relative_angle", echo_qos);
+    attitude_echo_pub_ = create_publisher<msg::AttitudeCommand>(
+      "~/command_echo/attitude", echo_qos);
+    rate_echo_pub_ = create_publisher<msg::AngularRateCommand>(
+      "~/command_echo/angular_rate", echo_qos);
+    proportional_echo_pub_ = create_publisher<msg::ProportionalRateCommand>(
+      "~/command_echo/proportional_rate", echo_qos);
     auto command_qos = rclcpp::QoS(1).reliable().durability_volatile();
     command_qos.lifespan(rclcpp::Duration::from_seconds(command_timeout_));
-    command_sub_ = create_subscription<msg::GimbalCommand>(
-      "~/command", command_qos,
-      [this](const msg::GimbalCommand & m) {manual(m);});
+    relative_sub_ = create_subscription<msg::RelativeAngleCommand>(
+      "~/command/relative_angle", command_qos,
+      [this](const msg::RelativeAngleCommand & m) {
+        if (manual(m.header, m.roll_deg, m.pitch_deg, 2, 0,
+          m.fpv_sensitivity, m.center_roll, m.center_pitch))
+        {
+          relative_echo_pub_->publish(m);
+        }
+      });
+    attitude_sub_ = create_subscription<msg::AttitudeCommand>(
+      "~/command/attitude", command_qos,
+      [this](const msg::AttitudeCommand & m) {
+        if (manual(m.header, m.roll_deg, m.pitch_deg, 1, 0, 0, m.center_roll, m.center_pitch)) {
+          attitude_echo_pub_->publish(m);
+        }
+      });
+    rate_sub_ = create_subscription<msg::AngularRateCommand>(
+      "~/command/angular_rate", command_qos,
+      [this](const msg::AngularRateCommand & m) {
+        if (manual(m.header, m.roll_deg_s, m.pitch_deg_s, 1, 2)) {
+          rate_echo_pub_->publish(m);
+        }
+      });
+    proportional_sub_ = create_subscription<msg::ProportionalRateCommand>(
+      "~/command/proportional_rate", command_qos,
+      [this](const msg::ProportionalRateCommand & m) {
+        if (manual(m.header, m.roll_deg_s, m.pitch_deg_s, 1, 1)) {
+          proportional_echo_pub_->publish(m);
+        }
+      });
     carrier_sub_ = create_subscription<msg::CarrierData>(
       "~/carrier", rclcpp::QoS(1), [this](const msg::CarrierData & m) {carrier(m);});
     camera_sub_ = create_subscription<msg::CameraData>(
@@ -199,53 +243,52 @@ private:
     rate_active_ = false;
   }
 
-  void manual(const msg::GimbalCommand & m)
+  bool manual(
+    const std_msgs::msg::Header & header, double roll, double pitch, uint8_t mode, uint8_t type,
+    int8_t sensitivity = 0, bool center_roll = false, bool center_pitch = false)
   {
     try {
       require_link();
-      check_stamp(m.header, command_timeout_);
+      check_stamp(header, command_timeout_);
       if (last_feedback_.state == 1 || last_feedback_.state == 2 || last_feedback_.state == 3) {
         throw std::runtime_error("Device initializing, stopped or protected");
       }
-      const std::array<uint8_t, 2> modes{m.roll_mode, m.pitch_mode};
-      const std::array<uint8_t, 2> types{m.roll_type, m.pitch_type};
-      const std::array<double, 2> values{m.roll, m.pitch};
+      const std::array<double, 2> values{roll, pitch};
       const std::array<double, 2> limits{roll_limit_, pitch_limit_};
-      const std::array<bool, 2> center{m.center_roll, m.center_pitch};
-      if (m.fpv_sensitivity < -16 || m.fpv_sensitivity > 15 ||
-        ((m.roll_mode == 2) != (m.pitch_mode == 2)))
-      {
-        throw std::invalid_argument("Invalid sensitivity or mixed FPV modes");
+      const std::array<bool, 2> center{center_roll, center_pitch};
+      if (sensitivity < -16 || sensitivity > 15) {
+        throw std::invalid_argument("Invalid FPV sensitivity");
       }
       auto candidate = control_;
       bool rate_active = false;
       for (std::size_t i = 0; i < 2; ++i) {
-        if (types[i] == 1 && (age(camera_time_) > auxiliary_timeout_ ||
+        if (type == 1 && (age(camera_time_) > auxiliary_timeout_ ||
           control_.zoom == 0 || control_.vertical_fov == 0))
         {
           throw std::invalid_argument("Proportional rate requires fresh nonzero zoom/FOV");
         }
-        if ((modes[i] != 1 && modes[i] != 2) || types[i] > 2 ||
-          (modes[i] == 2 && types[i] != 0) || !std::isfinite(values[i]) ||
-          std::abs(values[i]) > (types[i] == 0 ? limits[i] : max_rate_))
+        if ((mode != 1 && mode != 2) || type > 2 ||
+          (mode == 2 && type != 0) || !std::isfinite(values[i]) ||
+          std::abs(values[i]) > (type == 0 ? limits[i] : max_rate_))
         {
           throw std::invalid_argument("Invalid axis mode, non-finite value or exceeded limit");
         }
         auto & a = candidate.axes[i];
-        a.mode = modes[i];
-        a.type = types[i];
-        const double sign = i == 1 && modes[i] == 2 ? fpv_pitch_sign_ : 1.0;
-        a.value = quantize(sign * values[i], types[i] == 0 ? 0.01 : 0.1);
+        a.mode = mode;
+        a.type = type;
+        // Tested upright C20D: all wire pitch targets are positive head-up.
+        // Relative and IMU rate feedback have the opposite sign (see publish()).
+        a.value = quantize(values[i], type == 0 ? 0.01 : 0.1);
         if (center[i]) {
           a.center = !a.center;
         }
-        rate_active = rate_active || types[i] != 0;
+        rate_active = rate_active || type != 0;
       }
       // Horizontal C20D has no independently commanded yaw motor.
-      candidate.axes[2].mode = m.roll_mode == 2 ? 2 : 1;
-      candidate.axes[2].type = m.roll_mode == 2 ? 0 : 2;
+      candidate.axes[2].mode = mode == 2 ? 2 : 1;
+      candidate.axes[2].type = mode == 2 ? 0 : 2;
       candidate.axes[2].value = 0;
-      candidate.sensitivity = m.fpv_sensitivity;
+      candidate.sensitivity = sensitivity;
       control_ = candidate;
       command_time_ = Clock::now();
       rate_active_ = rate_active;
@@ -253,9 +296,11 @@ private:
         queue_command(4);
         active_mode_ = 4;
       }
+      return true;
     } catch (const std::exception & e) {
       ++rejected_commands_;
       RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000, "Rejected command: %s", e.what());
+      return false;
     }
   }
 
@@ -333,7 +378,28 @@ private:
       m.camera_attitude_rpy[i] = f.attitude[i] * 0.01;
       m.relative_angle_rpy[i] = f.relative[reorder[i]] * 0.01;
     }
+    // Head-up user convention; raw arrays and raw_frame remain lossless vendor data.
+    m.relative_angle_rpy[1] = -m.relative_angle_rpy[1];
+    m.camera_rate_rpy[1] = -m.camera_rate_rpy[1];
     state_pub_->publish(m);
+    msg::AngleState relative;
+    relative.header = m.header;
+    relative.roll_deg = m.relative_angle_rpy[0];
+    relative.pitch_deg = m.relative_angle_rpy[1];
+    relative.yaw_deg = m.relative_angle_rpy[2];
+    relative_pub_->publish(relative);
+    msg::AngleState attitude;
+    attitude.header = m.header;
+    attitude.roll_deg = m.camera_attitude_rpy[0];
+    attitude.pitch_deg = m.camera_attitude_rpy[1];
+    attitude.yaw_deg = m.camera_attitude_rpy[2];
+    attitude_pub_->publish(attitude);
+    msg::AngularRateState rate;
+    rate.header = m.header;
+    rate.roll_deg_s = m.camera_rate_rpy[0];
+    rate.pitch_deg_s = m.camera_rate_rpy[1];
+    rate.yaw_deg_s = m.camera_rate_rpy[2];
+    rate_pub_->publish(rate);
     sensor_msgs::msg::JointState joints;
     joints.header = m.header;
     joints.name = {"c20d_roll_joint", "c20d_pitch_joint"};
@@ -487,7 +553,6 @@ private:
   std::string port_name_, frame_id_, last_error_;
   double feedback_timeout_, command_timeout_, auxiliary_timeout_, max_rate_, roll_limit_,
     pitch_limit_;
-  double fpv_pitch_sign_ = -1.0;
   bool control_enabled_ = true;
   bool received_ = false;
   bool pending_sent_ = false;
@@ -500,7 +565,16 @@ private:
   rclcpp::Publisher<msg::GimbalState>::SharedPtr state_pub_;
   rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr joints_pub_;
   rclcpp::Publisher<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr diagnostics_pub_;
-  rclcpp::Subscription<msg::GimbalCommand>::SharedPtr command_sub_;
+  rclcpp::Publisher<msg::AngleState>::SharedPtr relative_pub_, attitude_pub_;
+  rclcpp::Publisher<msg::AngularRateState>::SharedPtr rate_pub_;
+  rclcpp::Publisher<msg::RelativeAngleCommand>::SharedPtr relative_echo_pub_;
+  rclcpp::Publisher<msg::AttitudeCommand>::SharedPtr attitude_echo_pub_;
+  rclcpp::Publisher<msg::AngularRateCommand>::SharedPtr rate_echo_pub_;
+  rclcpp::Publisher<msg::ProportionalRateCommand>::SharedPtr proportional_echo_pub_;
+  rclcpp::Subscription<msg::RelativeAngleCommand>::SharedPtr relative_sub_;
+  rclcpp::Subscription<msg::AttitudeCommand>::SharedPtr attitude_sub_;
+  rclcpp::Subscription<msg::AngularRateCommand>::SharedPtr rate_sub_;
+  rclcpp::Subscription<msg::ProportionalRateCommand>::SharedPtr proportional_sub_;
   rclcpp::Subscription<msg::CarrierData>::SharedPtr carrier_sub_;
   rclcpp::Subscription<msg::CameraData>::SharedPtr camera_sub_;
   rclcpp::Service<srv::DeviceCommand>::SharedPtr service_;

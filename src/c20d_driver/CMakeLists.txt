@@ -19,7 +19,12 @@ find_package(rosidl_default_generators REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/GimbalState.msg"
-  "msg/GimbalCommand.msg"
+  "msg/RelativeAngleCommand.msg"
+  "msg/AttitudeCommand.msg"
+  "msg/AngularRateCommand.msg"
+  "msg/ProportionalRateCommand.msg"
+  "msg/AngleState.msg"
+  "msg/AngularRateState.msg"
   "msg/CarrierData.msg"
   "msg/CameraData.msg"
   "srv/DeviceCommand.srv"

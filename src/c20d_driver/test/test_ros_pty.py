@@ -29,13 +29,20 @@ import struct
 import subprocess
 import time
 
+from c20d_driver.msg import AngleState
+from c20d_driver.msg import AngularRateCommand
+from c20d_driver.msg import AngularRateState
+from c20d_driver.msg import AttitudeCommand
 from c20d_driver.msg import CameraData
 from c20d_driver.msg import CarrierData
-from c20d_driver.msg import GimbalCommand
 from c20d_driver.msg import GimbalState
+from c20d_driver.msg import ProportionalRateCommand
+from c20d_driver.msg import RelativeAngleCommand
 from c20d_driver.srv import DeviceCommand
 import rclpy
+from rclpy.qos import DurabilityPolicy
 from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import QoSProfile
 from sensor_msgs.msg import JointState
 
 
@@ -52,10 +59,35 @@ def test_ros_serial_roundtrip():
         JointState, '/c20d_driver/joint_states', joints.append, qos_profile_sensor_data)
     subscription = node.create_subscription(
         GimbalState, '/c20d_driver/state', states.append, qos_profile_sensor_data)
-    publisher = node.create_publisher(GimbalCommand, '/c20d_driver/command', 1)
+    relative_states, attitude_states, rate_states = [], [], []
+    node.create_subscription(
+        AngleState, '/c20d_driver/state/relative_angle', relative_states.append,
+        qos_profile_sensor_data)
+    node.create_subscription(
+        AngleState, '/c20d_driver/state/attitude', attitude_states.append, qos_profile_sensor_data)
+    node.create_subscription(
+        AngularRateState, '/c20d_driver/state/angular_rate', rate_states.append,
+        qos_profile_sensor_data)
+    publisher = node.create_publisher(AttitudeCommand, '/c20d_driver/command/attitude', 1)
+    relative = node.create_publisher(
+        RelativeAngleCommand, '/c20d_driver/command/relative_angle', 1)
+    rate = node.create_publisher(AngularRateCommand, '/c20d_driver/command/angular_rate', 1)
+    proportional = node.create_publisher(
+        ProportionalRateCommand, '/c20d_driver/command/proportional_rate', 1)
     carrier = node.create_publisher(CarrierData, '/c20d_driver/carrier', 1)
     camera = node.create_publisher(CameraData, '/c20d_driver/camera', 1)
     client = node.create_client(DeviceCommand, '/c20d_driver/device_command')
+    echo_types = {
+        'relative_angle': RelativeAngleCommand,
+        'attitude': AttitudeCommand,
+        'angular_rate': AngularRateCommand,
+        'proportional_rate': ProportionalRateCommand,
+    }
+    echoes = {key: [] for key in echo_types}
+    echo_qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+    for key, message_type in echo_types.items():
+        node.create_subscription(
+            message_type, '/c20d_driver/command_echo/' + key, echoes[key].append, echo_qos)
     environment = dict(os.environ, ROS_DOMAIN_ID=str(domain))
     process = subprocess.Popen([
         os.environ['C20D_TEST_EXECUTABLE'], '--ros-args', '-p',
@@ -64,6 +96,7 @@ def test_ros_serial_roundtrip():
     wire = bytearray()
     sent = []
     respond = True
+    simulate_motion = False
     acknowledged_code = 0
 
     def pump(seconds):
@@ -87,6 +120,16 @@ def test_ros_serial_roundtrip():
                     reply = bytearray.fromhex(
                         'b5 9a 24 00 19 21 ff ff 00 00 fe ff '
                         '09 00 8c 35 b9 01 52 c9 5f 00 fe ff')
+                    if simulate_motion:
+                        # Ideal device fixture: positive wire targets raise the camera.
+                        # Encoder and gyro pitch feedback are opposite to attitude pitch.
+                        pitch = struct.unpack_from('<h', packet, 8)[0]
+                        if packet[7] >> 6 == 0:
+                            struct.pack_into('<h', reply, 14, pitch)
+                            struct.pack_into('<h', reply, 18, -pitch)
+                            struct.pack_into('<h', reply, 6, 0)
+                        else:
+                            struct.pack_into('<h', reply, 6, -pitch)
                     reply[5] = (acknowledged_code << 3) | 1
                     reply.extend(struct.pack('>H', binascii.crc_hqx(reply, 0)))
                     os.write(master, reply)
@@ -100,16 +143,33 @@ def test_ros_serial_roundtrip():
         assert state.upright and state.temperature_ready
         assert list(state.camera_rate_raw_pyr) == [-1, 0, -2]
         assert math.isclose(state.relative_angle_rpy[0], 0.95)
-        assert math.isclose(state.relative_angle_rpy[1], -139.98)
-        assert math.isclose(state.camera_rate_rpy[1], -0.1)
+        assert math.isclose(state.relative_angle_rpy[1], 139.98)
+        assert math.isclose(state.camera_rate_rpy[1], 0.1)
         assert math.isclose(state.camera_attitude_rpy[1], 137.08)
         assert joints and math.isclose(joints[-1].position[0], math.radians(0.95))
-        assert math.isclose(joints[-1].position[1], math.radians(-139.98))
+        assert math.isclose(joints[-1].position[1], math.radians(139.98))
+        assert state.header.frame_id == 'c20d_head_up'
+        assert list(state.relative_angle_raw_pyr) == [-13998, 95, -2]
+        assert list(state.camera_attitude_raw_rpy) == [9, 13708, 441]
+        assert math.isclose(relative_states[-1].pitch_deg, 139.98)
+        assert math.isclose(attitude_states[-1].pitch_deg, 137.08)
+        assert math.isclose(rate_states[-1].pitch_deg_s, 0.1)
+        assert relative_states[-1].header == attitude_states[-1].header
+        assert relative_states[-1].header == rate_states[-1].header
         assert all(packet[2] >> 3 == 0 for packet in sent), 'Startup must only poll'
+        assert relative.get_subscription_count() == 1
+        assert rate.get_subscription_count() == 1
+        assert proportional.get_subscription_count() == 1
+        assert node.count_subscribers('/c20d_driver/command') == 0
+        for key, message_type in echo_types.items():
+            info = node.get_publishers_info_by_topic('/c20d_driver/command_echo/' + key)
+            assert len(info) == 1 and info[0].topic_type.endswith('/' + message_type.__name__)
+            assert not echoes[key], 'Schema advertisement must not emit a startup command'
+        simulate_motion = True
 
-        command = GimbalCommand()
-        command.roll = 2.0
-        command.pitch = -3.0
+        command = AttitudeCommand()
+        command.roll_deg = 2.0
+        command.pitch_deg = -3.0
         command.center_roll = True
         publisher.publish(command)
         pump(0.15)
@@ -119,37 +179,109 @@ def test_ros_serial_roundtrip():
         assert sent[-1][7] == 0x10
         assert struct.unpack_from('<h', sent[-1], 5)[0] == 200
         assert struct.unpack_from('<h', sent[-1], 8)[0] == -300
+        assert math.isclose(attitude_states[-1].pitch_deg, -3.0)
+        assert len(echoes['attitude']) == 1 and echoes['attitude'][-1] == command
+        late_echoes = []
+        late_sub = node.create_subscription(
+            AttitudeCommand, '/c20d_driver/command_echo/attitude', late_echoes.append, echo_qos)
+        pump(0.2)
+        assert late_echoes and late_echoes[-1] == command
+        node.destroy_subscription(late_sub)
         previous = sent[-1][4:13]
 
-        command.roll = float('nan')
+        command.roll_deg = float('nan')
         publisher.publish(command)
         pump(0.05)
         assert sent[-1][4:13] == previous
-        command.roll = 61.0
+        command.roll_deg = 61.0
         publisher.publish(command)
         pump(0.05)
         assert sent[-1][4:13] == previous
 
-        command = GimbalCommand()
-        command.roll_mode = 2
-        command.pitch_mode = 2
-        command.pitch = 2.0
+        # Reject stale/future targets without replacing the last accepted command.
+        command = AttitudeCommand()
+        command.pitch_deg = 4.0
+        command.header.stamp.sec = 1
         publisher.publish(command)
-        pump(0.1)
-        assert sent[-1][4] == 0x28
+        pump(0.05)
+        assert sent[-1][4:13] == previous
+        command.header.stamp.sec = node.get_clock().now().seconds_nanoseconds()[0] + 10
+        publisher.publish(command)
+        pump(0.05)
+        assert sent[-1][4:13] == previous
+
+        assert len(echoes['attitude']) == 1, 'Rejected commands must not be echoed'
+        for target in (2.0, -2.0):
+            command = RelativeAngleCommand()
+            command.roll_deg = 1.0
+            command.pitch_deg = target
+            command.fpv_sensitivity = -3
+            relative.publish(command)
+            pump(0.1)
+            assert echoes['relative_angle'] and echoes['relative_angle'][-1] == command
+            assert sent[-1][4] == 0x28
+            assert sent[-1][7] == 0x20
+            assert sent[-1][10] == 0x20, 'FPV applies to all protocol axes'
+            assert sent[-1][3] >> 3 == 29  # Signed five-bit -3.
+            assert struct.unpack_from('<h', sent[-1], 5)[0] == 100
+            assert struct.unpack_from('<h', sent[-1], 8)[0] == round(target * 100)
+            assert math.isclose(relative_states[-1].pitch_deg, target)
+            assert math.isclose(states[-1].relative_angle_rpy[1], target)
+            assert math.isclose(joints[-1].position[1], math.radians(target))
+            assert states[-1].relative_angle_raw_pyr[0] == round(-target * 100)
+        pump(0.3)
+        assert struct.unpack_from('<h', sent[-1], 8)[0] == -200, 'Angles keep holding'
+        previous = sent[-1][4:13]
+        command.fpv_sensitivity = 16
+        relative.publish(command)
+        pump(0.05)
+        assert sent[-1][4:13] == previous
+
+        for target in (2.0, -2.0):
+            command = AttitudeCommand()
+            command.pitch_deg = target
+            publisher.publish(command)
+            pump(0.1)
+            assert sent[-1][7] == 0x10
+            assert struct.unpack_from('<h', sent[-1], 8)[0] == round(target * 100)
+            assert math.isclose(attitude_states[-1].pitch_deg, target)
+            assert math.isclose(states[-1].camera_attitude_rpy[1], target)
+
+        for target in (5.0, -5.0):
+            command = AngularRateCommand()
+            command.pitch_deg_s = target
+            rate.publish(command)
+            pump(0.1)
+            assert echoes['angular_rate'] and echoes['angular_rate'][-1] == command
+            assert sent[-1][7] == 0x90
+            assert struct.unpack_from('<h', sent[-1], 8)[0] == round(target * 10)
+            assert math.isclose(rate_states[-1].pitch_deg_s, target)
+            assert math.isclose(states[-1].camera_rate_rpy[1], target)
+            assert states[-1].camera_rate_raw_pyr[0] == round(-target * 10)
+            # Invalid speed must not refresh the watchdog.
+            command.pitch_deg_s = 1000.0
+            rate.publish(command)
+            pump(0.25)
+            assert struct.unpack_from('<h', sent[-1], 8)[0] == 0
+
+        # A later angle command supersedes a rate command, including its watchdog.
+        command = AngularRateCommand()
+        command.pitch_deg_s = 5.0
+        rate.publish(command)
+        pump(0.05)
+        angle = RelativeAngleCommand()
+        angle.pitch_deg = -3.0
+        relative.publish(angle)
+        pump(0.3)
         assert sent[-1][7] == 0x20
-        assert struct.unpack_from('<h', sent[-1], 8)[0] == -200
+        assert struct.unpack_from('<h', sent[-1], 8)[0] == -300
 
-        command = GimbalCommand()
-        command.roll_type = 2
-        command.pitch_type = 2
-        command.pitch = 5.0
-        publisher.publish(command)
-        pump(0.1)
-        assert sent[-1][7] == 0x90
-        assert struct.unpack_from('<h', sent[-1], 8)[0] == 50
-        pump(0.25)
-        assert struct.unpack_from('<h', sent[-1], 8)[0] == 0
+        # Proportional rate is a distinct input and requires camera metadata.
+        scaled_rate = ProportionalRateCommand()
+        scaled_rate.pitch_deg_s = 3.0
+        proportional.publish(scaled_rate)
+        pump(0.05)
+        assert sent[-1][7] == 0x20
 
         inertial = CarrierData()
         inertial.valid = True
@@ -170,6 +302,20 @@ def test_ros_serial_roundtrip():
         camera.publish(optical)
         pump(0.1)
         assert struct.unpack_from('<ff', sent[-1], 30) == (2.0, -3.0)
+        for target in (3.0, -3.0):
+            camera.publish(optical)
+            pump(0.05)
+            scaled_rate.pitch_deg_s = target
+            proportional.publish(scaled_rate)
+            pump(0.05)
+            assert echoes['proportional_rate'] and echoes['proportional_rate'][-1] == scaled_rate
+            assert sent[-1][7] == 0x50
+            assert struct.unpack_from('<h', sent[-1], 8)[0] == round(target * 10)
+        # Refresh command but let camera expire: scaled speed must stop anyway.
+        for _ in range(4):
+            proportional.publish(scaled_rate)
+            pump(0.06)
+        assert struct.unpack_from('<h', sent[-1], 8)[0] == 0
 
         assert client.service_is_ready()
         request = DeviceCommand.Request()
